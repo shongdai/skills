@@ -2,25 +2,23 @@
 # =============================================================================
 # GEO_download_ncbicount.R - GEO NCBI 标准化 RNA-seq counts 下载与预处理（CLI 版）
 #
-# 描述: 自动从 NCBI 下载官方整理的 RNA-seq counts 表达矩阵（raw_counts / FPKM /
+# 描述: 自动从 NCBI 下载官方整理的人类 RNA-seq counts 表达矩阵（raw_counts / FPKM /
 #       TPM），完成基因 ID 到基因 symbol 的转换、基因过滤。
 #       基于 gse_id 自动匹配 NCBI 整理的 RNA-seq counts 表达矩阵文件。
-#       默认读取物种对应的注释文件（如 Human.GRCh38.p13.annot.tsv.gz /
-#       Mouse.GRCm39.annot.tsv.gz）；若不存在则使用 clusterProfiler::bitr。
-#       支持人/小鼠物种切换。
+#       默认读取 Human.GRCh38.p13.annot.tsv.gz 注释文件；
+#       若不存在则使用 clusterProfiler::bitr。
+#       （NCBI 目前仅提供人类 RNA-seq count 数据，小鼠尚未上线）
 # 作者: 科研木鱼（小红书：科研木鱼）
-# 版本: 2.0  —— 命令行参数化 + 物种切换
+# 版本: 2.1  —— 移除 mouse（NCBI 尚未支持小鼠）
 #
 # 使用方法（CLI）:
 #   Rscript GEO_download_ncbicount.R --gse GSE56545
 #   Rscript GEO_download_ncbicount.R --gse GSE56545,GSE70089,GSE33294 --diff TRUE
-#   Rscript GEO_download_ncbicount.R --gse GSE100001 --species mouse
 #   Rscript GEO_download_ncbicount.R --gse GSE56545 --out ./data --proxy http://127.0.0.1:7897
 #   Rscript GEO_download_ncbicount.R --help
 #
 # 参数:
 #   --gse <ids>        必填，GSE 号（多个用逗号分隔）
-#   --species <name>   human / mouse，默认 human
 #   --out <dir>        输出根目录，默认 "."
 #   --diff <T/F>       是否生成 group/diff 模板，默认 FALSE
 #   --proxy <url>      HTTP 代理 URL，默认 http://127.0.0.1:7897；空串关闭
@@ -32,7 +30,6 @@
 parse_cli_args <- function(args) {
   defaults <- list(
     gse        = NULL,
-    species    = "human",
     out        = ".",
     diff       = FALSE,
     proxy      = "http://127.0.0.1:7897",
@@ -45,7 +42,6 @@ parse_cli_args <- function(args) {
     val <- if (i + 1 <= length(args)) args[i + 1] else NA
     switch(a,
       "--gse"        = { defaults$gse       <- val; i <- i + 2 },
-      "--species"    = { defaults$species   <- val; i <- i + 2 },
       "--out"        = { defaults$out       <- val; i <- i + 2 },
       "--diff"       = { defaults$diff      <- toupper(val) %in% c("T", "TRUE", "1", "YES"); i <- i + 2 },
       "--proxy"      = { defaults$proxy     <- val; i <- i + 2 },
@@ -68,7 +64,6 @@ if (isTRUE(ARGS$help) || is.null(ARGS$gse)) {
   cat("必填:\n")
   cat("  --gse <ids>        GSE 号（多个用逗号分隔）\n\n")
   cat("可选:\n")
-  cat("  --species <name>   human / mouse（默认 human）\n")
   cat("  --out <dir>        输出根目录（默认 .）\n")
   cat("  --diff <T/F>       生成 group/diff 模板（默认 FALSE）\n")
   cat("  --proxy <url>      HTTP 代理 URL（默认 http://127.0.0.1:7897）\n")
@@ -76,7 +71,6 @@ if (isTRUE(ARGS$help) || is.null(ARGS$gse)) {
   cat("  --help             显示帮助\n\n")
   cat("示例:\n")
   cat("  Rscript GEO_download_ncbicount.R --gse GSE56545\n")
-  cat("  Rscript GEO_download_ncbicount.R --gse GSE100001 --species mouse\n")
   cat("  Rscript GEO_download_ncbicount.R --gse GSE56545,GSE70089 --diff TRUE\n")
   if (is.null(ARGS$gse) && !isTRUE(ARGS$help)) {
     cat("\n[错误] 缺少必填参数 --gse\n")
@@ -87,40 +81,18 @@ if (isTRUE(ARGS$help) || is.null(ARGS$gse)) {
 
 # 解析多个 GSE
 gse_id_vec <- strsplit(ARGS$gse, ",")[[1]] |> trimws() |> (\(x) x[nzchar(x)])()
-species    <- ARGS$species
 out_root   <- ARGS$out
 diff       <- if (isTRUE(ARGS$diff)) "TRUE" else "FALSE"
 dir.create(out_root, recursive = TRUE, showWarnings = FALSE)
 
-# 物种配置
-species_config <- list(
-  human = list(
-    genome_tag     = "GRCh38.p13",
-    annot_filename = "Human.GRCh38.p13.annot.tsv.gz",
-    org_db         = "org.Hs.eg.db"
-  ),
-  mouse = list(
-    genome_tag     = "GRCm39",
-    annot_filename = "Mouse.GRCm39.annot.tsv.gz",
-    org_db         = "org.Mm.eg.db"
-  )
-)
-if (!species %in% names(species_config)) {
-  stop("[错误] 不支持的 species：", species, "（请用 human / mouse）")
-}
-genome_tag     <- species_config[[species]]$genome_tag
-annot_filename <- species_config[[species]]$annot_filename
-org_db_name    <- species_config[[species]]$org_db
-cat(sprintf("[物种] species=%s -> genome_tag=%s, annot=%s, OrgDb=%s\n",
-            species, genome_tag, annot_filename, org_db_name))
+# 人类配置（NCBI 目前仅提供人类 RNA-seq count 数据）
+genome_tag     <- "GRCh38.p13"
+annot_filename <- "Human.GRCh38.p13.annot.tsv.gz"
+org_db_name    <- "org.Hs.eg.db"
 
 cat("========== CLI 参数 ==========\n")
 cat("GSE 列表  :", paste(gse_id_vec, collapse = ", "), "\n")
 cat("输出根目录:", normalizePath(out_root, mustWork = FALSE), "\n")
-cat("species   :", species, "\n")
-cat("genome_tag:", genome_tag, "\n")
-cat("annot文件 :", annot_filename, "\n")
-cat("org_db    :", org_db_name, "\n")
 cat("diff      :", diff, "\n")
 cat("proxy     :", ifelse(nzchar(ARGS$proxy), ARGS$proxy, "(未设)"), "\n")
 cat("timeout   :", ARGS$timeout, "\n\n")

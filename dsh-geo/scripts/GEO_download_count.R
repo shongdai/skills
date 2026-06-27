@@ -11,7 +11,7 @@
 #
 # 使用方法（CLI）:
 #   Rscript GEO_download_count.R --gse GSE152418
-#   Rscript GEO_download_count.R --gse GSE99999 --species mouse --from-type ENSEMBL
+#   Rscript GEO_download_count.R --gse GSE266899 --species mouse --from-type ENSEMBL
 #   Rscript GEO_download_count.R --gse GSE99999 --species custom --org-db org.Rn.eg.db
 #   Rscript GEO_download_count.R --gse GSE99999 --keyword expression
 #   Rscript GEO_download_count.R --help

@@ -6,11 +6,19 @@
 #         - .CEL → affy::ReadAffy + rma()（背景校正 + quantile + log2）
 #         - .txt → limma::read.maimages + normexp（Agilent 路径）
 #       然后做探针 → 基因 symbol 转换、基因过滤、log2 检测。
+#       默认不下载 suppl（需先用 GEO_pre_download.py --preset cel 预下载）；
+#       传 --download-suppl TRUE 可恢复在线下载行为。
 # 作者: 科研木鱼（闲鱼/小红书）
-# 版本: 2.0  —— 命令行参数化
+# 版本: 2.1  —— 默认跳过 getGEOSuppFiles，改为预下载
 #
 # 使用方法（CLI）:
+#   # 推荐流程：先预下载，再跑 R 脚本（避免下载中断）
+#   python scripts/GEO_pre_download.py --gse GSE5281 --preset cel
 #   Rscript GEO_download_cel.R --gse GSE5281
+#
+#   # 或直接在线下载（不推荐，不支持断点续传）
+#   Rscript GEO_download_cel.R --gse GSE5281 --download-suppl TRUE
+#
 #   Rscript GEO_download_cel.R --gse GSE5281 --out ./data --diff TRUE
 #   Rscript GEO_download_cel.R --gse GSE5281 --use-idmap TRUE --proxy http://127.0.0.1:7897
 #   Rscript GEO_download_cel.R --help
@@ -18,6 +26,7 @@
 # 参数:
 #   --gse <id>           必填，单个 GSE 号（CEL 路径一次处理一个 GSE）
 #   --out <dir>          输出根目录，默认 "."
+#   --download-suppl <T/F> 是否在线下载 suppl.tar，默认 FALSE（需先预下载）
 #   --use-idmap <T/F>    是否优先 AnnoProbe::idmap() 在线注释，默认 FALSE
 #   --probe-col <name>   本地 GPL 探针 ID 列名，默认 "ID"
 #   --gene-col <name>    本地 GPL 基因注释列名，默认 "gene_assignment"
@@ -30,31 +39,33 @@
 # ---------- CLI 参数解析 ----------
 parse_cli_args <- function(args) {
   defaults <- list(
-    gse        = NULL,
-    out        = ".",
-    use_idmap  = FALSE,
-    probe_col  = "ID",
-    gene_col   = "gene_assignment",
-    diff       = FALSE,
-    proxy      = "http://127.0.0.1:7897",
-    timeout    = 600L,
-    help       = FALSE
+    gse          = NULL,
+    out          = ".",
+    download_suppl = FALSE,
+    use_idmap    = FALSE,
+    probe_col    = "ID",
+    gene_col     = "gene_assignment",
+    diff         = FALSE,
+    proxy        = "http://127.0.0.1:7897",
+    timeout      = 600L,
+    help         = FALSE
   )
   i <- 1
   while (i <= length(args)) {
     a <- args[i]
     val <- if (i + 1 <= length(args)) args[i + 1] else NA
     switch(a,
-      "--gse"        = { defaults$gse       <- val; i <- i + 2 },
-      "--out"        = { defaults$out       <- val; i <- i + 2 },
-      "--use-idmap"  = { defaults$use_idmap <- toupper(val) %in% c("T", "TRUE", "1", "YES"); i <- i + 2 },
-      "--probe-col"  = { defaults$probe_col <- val; i <- i + 2 },
-      "--gene-col"   = { defaults$gene_col  <- val; i <- i + 2 },
-      "--diff"       = { defaults$diff      <- toupper(val) %in% c("T", "TRUE", "1", "YES"); i <- i + 2 },
-      "--proxy"      = { defaults$proxy     <- val; i <- i + 2 },
-      "--timeout"    = { defaults$timeout   <- as.integer(val); i <- i + 2 },
-      "--help"       = { defaults$help      <- TRUE; i <- i + 1 },
-      "-h"           = { defaults$help      <- TRUE; i <- i + 1 },
+      "--gse"            = { defaults$gse            <- val; i <- i + 2 },
+      "--out"            = { defaults$out            <- val; i <- i + 2 },
+      "--download-suppl" = { defaults$download_suppl <- toupper(val) %in% c("T", "TRUE", "1", "YES"); i <- i + 2 },
+      "--use-idmap"      = { defaults$use_idmap      <- toupper(val) %in% c("T", "TRUE", "1", "YES"); i <- i + 2 },
+      "--probe-col"      = { defaults$probe_col      <- val; i <- i + 2 },
+      "--gene-col"       = { defaults$gene_col       <- val; i <- i + 2 },
+      "--diff"           = { defaults$diff           <- toupper(val) %in% c("T", "TRUE", "1", "YES"); i <- i + 2 },
+      "--proxy"          = { defaults$proxy          <- val; i <- i + 2 },
+      "--timeout"        = { defaults$timeout        <- as.integer(val); i <- i + 2 },
+      "--help"           = { defaults$help           <- TRUE; i <- i + 1 },
+      "-h"               = { defaults$help           <- TRUE; i <- i + 1 },
       {
         cat("[警告] 未识别参数: ", a, "（已跳过）\n", sep = "")
         i <- i + 1
@@ -72,6 +83,7 @@ if (isTRUE(ARGS$help) || is.null(ARGS$gse)) {
   cat("  --gse <id>           单个 GSE 号（RAW 路径一次处理一个）\n\n")
   cat("可选:\n")
   cat("  --out <dir>          输出根目录（默认 .）\n")
+  cat("  --download-suppl <T/F> 在线下载 suppl.tar（默认 FALSE，需先预下载）\n")
   cat("  --use-idmap <T/F>    在线注释 idmap()（默认 FALSE）\n")
   cat("  --probe-col <name>   本地 GPL 探针列名（默认 ID）\n")
   cat("  --gene-col <name>    本地 GPL 基因列名（默认 gene_assignment）\n")
@@ -79,9 +91,12 @@ if (isTRUE(ARGS$help) || is.null(ARGS$gse)) {
   cat("  --proxy <url>        HTTP 代理 URL（默认 http://127.0.0.1:7897）\n")
   cat("  --timeout <sec>      下载超时（默认 600）\n")
   cat("  --help               显示帮助\n\n")
+  cat("推荐流程:\n")
+  cat("  先预下载: python scripts/GEO_pre_download.py --gse GSE5281 --preset cel\n")
+  cat("  再跑 R :  Rscript GEO_download_cel.R --gse GSE5281\n\n")
   cat("示例:\n")
-  cat("  Rscript GEO_download_cel.R --gse GSE5281\n")
   cat("  Rscript GEO_download_cel.R --gse GSE5281 --out ./data --diff TRUE\n")
+  cat("  Rscript GEO_download_cel.R --gse GSE5281 --download-suppl TRUE\n")
   if (is.null(ARGS$gse) && !isTRUE(ARGS$help)) {
     cat("\n[错误] 缺少必填参数 --gse\n")
     quit(status = 1)
@@ -90,6 +105,7 @@ if (isTRUE(ARGS$help) || is.null(ARGS$gse)) {
 }
 
 gse_id          <- ARGS$gse
+download_suppl  <- isTRUE(ARGS$download_suppl)
 use_idmap       <- isTRUE(ARGS$use_idmap)
 probe_id_col    <- ARGS$probe_col
 gene_symbol_col <- ARGS$gene_col
@@ -100,14 +116,15 @@ output_dir <- file.path(out_root, gse_id)
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
 cat("========== CLI 参数 ==========\n")
-cat("GSE      :", gse_id, "\n")
-cat("输出目录 :", normalizePath(output_dir, mustWork = FALSE), "\n")
-cat("use_idmap:", use_idmap, "\n")
-cat("probe-col:", probe_id_col, "\n")
-cat("gene-col :", gene_symbol_col, "\n")
-cat("diff     :", diff, "\n")
-cat("proxy    :", ifelse(nzchar(ARGS$proxy), ARGS$proxy, "(未设)"), "\n")
-cat("timeout  :", ARGS$timeout, "\n\n")
+cat("GSE          :", gse_id, "\n")
+cat("输出目录     :", normalizePath(output_dir, mustWork = FALSE), "\n")
+cat("download_suppl:", download_suppl, "\n")
+cat("use_idmap    :", use_idmap, "\n")
+cat("probe-col    :", probe_id_col, "\n")
+cat("gene-col     :", gene_symbol_col, "\n")
+cat("diff         :", diff, "\n")
+cat("proxy        :", ifelse(nzchar(ARGS$proxy), ARGS$proxy, "(未设)"), "\n")
+cat("timeout      :", ARGS$timeout, "\n\n")
 
 # ---------- 加载依赖 ----------
 # 如缺少包，请运行: Rscript scripts/install_dependencies.R
@@ -163,12 +180,39 @@ if (diff == "TRUE") {
   cat("diff =", diff, "，跳过生成分组文件\n")
 }
 
-# 下载 supplementary 包含 RAW 数据
-getGEOSuppFiles(gse_id, makeDirectory = FALSE, baseDir = output_dir)
+# 下载 / 定位 supplementary RAW 数据
+raw_dir  <- file.path(output_dir, paste0(gse_id, "_RAW"))
+raw_tar  <- file.path(output_dir, paste0(gse_id, "_RAW.tar"))
+raw_gz   <- file.path(output_dir, paste0(gse_id, "_RAW.tar.gz"))
 
-# 解压 _RAW.tar
-raw_dir <- file.path(output_dir, paste0(gse_id, "_RAW"))
-untar(file.path(output_dir, paste0(gse_id, "_RAW.tar")), exdir = raw_dir)
+if (isTRUE(download_suppl)) {
+  cat("在线下载 suppl（getGEOSuppFiles，不支持断点续传）...\n")
+  getGEOSuppFiles(gse_id, makeDirectory = FALSE, baseDir = output_dir)
+  if (file.exists(raw_tar)) {
+    untar(raw_tar, exdir = raw_dir)
+  } else if (file.exists(raw_gz)) {
+    untar(raw_gz, exdir = raw_dir)
+  } else {
+    cat("[警告] getGEOSuppFiles 完成但未找到 _RAW.tar / _RAW.tar.gz\n")
+  }
+} else {
+  cat("跳过在线下载 suppl，检查本地文件...\n")
+  # 检查是否已有解压后的 RAW 目录
+  if (dir.exists(raw_dir)) {
+    cat("已存在解压目录:", raw_dir, "\n")
+  } else if (file.exists(raw_tar)) {
+    cat("解压本地:", raw_tar, "\n")
+    untar(raw_tar, exdir = raw_dir)
+  } else if (file.exists(raw_gz)) {
+    cat("解压本地:", raw_gz, "\n")
+    untar(raw_gz, exdir = raw_dir)
+  } else {
+    cat("\n[错误] 本地未找到 RAW 文件！请先运行预下载脚本:\n")
+    cat("  python scripts/GEO_pre_download.py --gse", gse_id, "--preset cel\n")
+    cat("或添加 --download-suppl TRUE 在线下载（不推荐，不支持断点续传）\n\n")
+    stop("缺少 RAW 输入文件: ", raw_tar, " 或 ", raw_dir)
+  }
+}
 
 # 自动检测样本文件类型
 cel_files <- list.files(raw_dir, pattern = "\\.CEL(\\.gz)?$", full.names = FALSE)

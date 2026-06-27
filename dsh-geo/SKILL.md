@@ -1,6 +1,6 @@
 ---
 name: "dsh-geo"
-description: "GEO data skill. Query GSE metadata with Python (Bio.Entrez/GEOparse); download+preprocess with bundled CLI R scripts (scripts/GEO_download_probe.R / GEO_download_cel.R) — invoke when user mentions GSE/GEO/GSM/probe2gene/expression matrix/CEL/RMA/batch download."
+description: "GEO data skill. Query GSE metadata and download/preprocess expression matrices (probe/CEL/RNA-seq) via bundled CLI R scripts. Invoke when user mentions GSE/GEO or needs expression matrix download."
 ---
 
 # DSH-GEO 技能（命令行调用版）
@@ -18,13 +18,14 @@ description: "GEO data skill. Query GSE metadata with Python (Bio.Entrez/GEOpars
 
 | 数据形态 | 调用脚本（CLI） |
 |---|---|
+| **一键自动（推荐）** | `python scripts/GEO_run.py --gse <GSE>`  ← 嗅探→下载→检查 全自动 |
 | **不知道用哪个脚本？** | `python scripts/GEO_smart_sniff.py --gse <GSE>`  ← 先嗅探，5-7s |
 | **想先把原始文件拉到本地**（离线/加速） | `python scripts/GEO_pre_download.py --gse <GSE> --preset <probe/cel/ncbicount/count/all>` |
 | Series Matrix（已归一化矩阵）| `Rscript scripts/GEO_download_probe.R --gse <GSE>` |
 | RAW（.CEL / .txt 原始文件）| `Rscript scripts/GEO_download_cel.R --gse <GSE>` |
 | RNA-seq Count/FPKM/TPM（**NCBI 整理版**） | `Rscript scripts/GEO_download_ncbicount.R --gse <GSE> --species <human/mouse>` |
 | RNA-seq Count（**作者上传 supplementary**） | `Rscript scripts/GEO_download_count.R --gse <GSE> --species <human/mouse> --from-type <ID>` |
-| miRNA | _（占位：scripts/GEO_download_mirna.R）_ |
+| miRNA | _（未实现，见扩展计划）_ |
 
 > ⚠️ Python 仅用于查询；下载与预处理一律走 `scripts/` 中的 R 脚本（命令行调用，无需改源码）。
 >
@@ -53,27 +54,33 @@ description: "GEO data skill. Query GSE metadata with Python (Bio.Entrez/GEOpars
 ```
 用户给了 GSE 号了吗？
    │
-   ├─ 没有，想"找数据集 / 搜索"
+   ├─ 没有 / 想"搜索 / 看元数据"
    │     └─→ 跳到「一、查询 GEO（Python）」
    │
-   ├─ 有了，想"看元数据 / 实验设计"（不下载）
-   │     └─→ 跳到「一、查询 GEO（Python）」
+   ├─ 有了，想"一键下载"（推荐）
+   │     └─→ python scripts/GEO_run.py --gse <GSE> [--diff]    ← 全自动
+   │           内部：嗅探 → (CEL预下载) → R脚本 → 检查报告
    │
-   ├─ 有了，想"自动选脚本 + 下载"
-   │     └─→ python scripts/GEO_smart_sniff.py --gse <GSE>     [5-7s 嗅探]
-   │           → 输出推荐命令，直接复制运行
+   ├─ 有了，想"手动分步"（调试 / 单步控制）
+   │     └─→ 看下方分步路径
+   │
    │
    ├─ 有了，想"下载表达矩阵 + ID映射 + log2"（最常见）
    │     └─→ Rscript scripts/GEO_download_probe.R --gse <GSE_ID>
+   │         → python scripts/GEO_expMatrix_check.py            [检查结果]
    │
    ├─ 有了，想"RAW / CEL / RMA 重新归一化"
-   │     └─→ Rscript scripts/GEO_download_cel.R --gse <GSE_ID>
+   │     └─→ python scripts/GEO_pre_download.py --gse <GSE_ID> --preset cel   （必需！cel.R 默认不下载 suppl）
+   │         → Rscript scripts/GEO_download_cel.R --gse <GSE_ID>
+   │         → python scripts/GEO_expMatrix_check.py            [检查结果]
    │
    ├─ RNA-seq，NCBI 整理过的标准 raw_counts / FPKM / TPM
    │     └─→ Rscript scripts/GEO_download_ncbicount.R --gse <GSE> --species human/mouse
+   │         → python scripts/GEO_expMatrix_check.py            [检查结果]
    │
    ├─ RNA-seq，NCBI 未整理，需要从作者上传的 supplementary 解析 *count* 文件
    │     └─→ Rscript scripts/GEO_download_count.R --gse <GSE> --species human/mouse --from-type ENSEMBL
+   │         → python scripts/GEO_expMatrix_check.py            [检查结果]
    │
    └─ miRNA？
          └─ TODO：等待 scripts/GEO_download_mirna.R 加入
@@ -119,32 +126,18 @@ ID 类型    : ENSEMBL
 
 ---
 
-### 0.5 预下载（可选 / 离线兜底 / 加速 R 脚本）
+### 0.5 预下载（仅 CEL 路径必需，其他可选加速）
 
-`scripts/GEO_pre_download.py` 把 GEO FTP 上 5 类原始文件按"预设"批量拉到本地，**为后续 R 脚本提供素材**。R 脚本本身能独立下载，因此 Python 失败不影响 R。
+`scripts/GEO_pre_download.py` 使用 Python `requests` 多线程下载，**支持 HTTP Range 断点续传**，比 R 脚本内置的 `getGEOSuppFiles`（不支持续传）更稳定。
+
+| 路径 | 是否必需预下载 | 原因 |
+|---|---|---|
+| **CEL** (`GEO_download_cel.R`) | **必需** | RAW.tar 文件大（数百 MB），`cel.R` 默认不调用 `getGEOSuppFiles` |
+| probe / ncbicount / count | 可选 | 数据量小，R 脚本内置下载即可 |
 
 ```powershell
-# 全量备份（5 类全开 = soft + miniml + matrix + suppl + gpl）
-python scripts/GEO_pre_download.py --gse GSE76262
-
-# 配合 R 芯片预处理（probe.R）：只要 matrix + gpl
-python scripts/GEO_pre_download.py --gse GSE76262 --preset probe
-
-# 配合 R CEL 路径（cel.R）：matrix + suppl + gpl
+# 配合 R CEL 路径（cel.R）：matrix + suppl + gpl  ← 必需！
 python scripts/GEO_pre_download.py --gse GSE5281 --preset cel
-
-# 配合 RNA-seq NCBI 整理矩阵（ncbicount.R）：仅 matrix（NCBI raw_counts 由 R 单独下）
-python scripts/GEO_pre_download.py --gse GSE190451 --preset ncbicount
-
-# 配合作者 supplementary count（count.R）：matrix + suppl
-python scripts/GEO_pre_download.py --gse GSE266899 --preset count
-
-# 自定义类别
-python scripts/GEO_pre_download.py --gse GSE76262 --preset custom --types matrix,gpl
-
-# 批量 + 输出目录 + 16 线程
-python scripts/GEO_pre_download.py --gse GSE5281,GSE190451,GSE266899 --preset all --out ./data --workers 16
-```
 
 #### 预设 ↔ R 脚本对应关系
 
@@ -171,7 +164,20 @@ python scripts/GEO_pre_download.py --gse GSE5281,GSE190451,GSE266899 --preset al
 | `--retries <N>` | `3` | 失败重试 |
 | `--suppl-block <a,b>` | `filelist` | 屏蔽 suppl 文件名包含的关键字 |
 
-> ⚠️ 预下载是**可选优化**。如果跳过，直接跑 R 脚本也会自动下载所需文件。建议遇到网络慢/需要批量缓存时再启用。
+> 完整流程见 [§2.0 GEO_run.py](#20-georunpy-—-一键自动编排推荐)。CEL 路径需额外预下载，详见 [§2.4](#24-geodownload_celr-cel-raw-路径)。
+
+#### R 脚本运行耗时参考
+
+R 脚本执行分为两个阶段：**网络下载**（依赖代理和带宽）和**本地计算**（依赖 CPU/内存）。建议调用时设置充足的超时。
+
+| 脚本 | 典型耗时 | 瓶颈 |
+|---|---|---|
+| `GEO_download_probe.R` | 1-5 分钟 | GPL 注释下载 + ID 映射（大 GPL 如 GPL570 > 10 万行注释） |
+| `GEO_download_cel.R` | 5-30 分钟 | RAW.tar 下载 + RMA 归一化（样本数 × CEL 大小） |
+| `GEO_download_ncbicount.R` | 1-5 分钟 | NCBI count 矩阵下载 + 基因注释 |
+| `GEO_download_count.R` | 2-10 分钟 | suppl 文件下载 + 解压 + 识别 count 文件 |
+
+> 建议命令调用时带 `--timeout 1800`（30 分钟），并确保运行环境不要提前终止子进程。多 GSE 批量时总耗时 = Σ(各 GSE 耗时)。
 
 ---
 
@@ -265,7 +271,69 @@ print(gse.metadata['title'], gse.metadata['summary'])
 
 ---
 
-## 二、下载与预处理（CLI R 脚本）
+## 二、下载与预处理（R CLI 脚本）
+
+### 2.0 GEO_run.py — 一键自动编排（推荐）
+
+将嗅探→下载→检查串成一条命令，**输出精简**，适合批量处理。
+
+```powershell
+# 单 GSE
+python scripts/GEO_run.py --gse GSE5281
+
+# 多 GSE + 生成 diff 模板
+python scripts/GEO_run.py --gse GSE5281,GSE266899 --diff
+
+# 指定输出目录 + 自定义超时
+python scripts/GEO_run.py --gse GSE5281 --out ./data --timeout 3600
+
+# 跳过最终检查（只下载）
+python scripts/GEO_run.py --gse GSE5281 --skip-check
+
+# 自定义日志文件 / 禁用日志
+python scripts/GEO_run.py --gse GSE5281 --log ./run.log
+python scripts/GEO_run.py --gse GSE5281 --no-log
+```
+
+内部自动判断：
+- CEL 路径 → 先 `pre_download --preset cel` → 再 `cel.R`
+- 其他路径 → 直接调对应 R 脚本
+- 全部完成后 → 自动跑 `GEO_expMatrix_check.py`
+
+#### 🤖 AI 调用范式（重要）
+
+`GEO_run.py` v1.2 起内置 **UTF-8 双写日志 + 阶段标记**，AI **不再依赖终端缓冲**，应通过日志文件判断进度：
+
+| 项 | 约定 |
+|---|---|
+| 日志路径 | 默认 `<out>/_GEO_run.log`（UTF-8） |
+| 编码 | 强制 UTF-8（避免 Windows GBK 乱码） |
+| 实时性 | 行缓冲，可边跑边读 |
+| 阶段标记 | `[START]` `[SNIFF_DONE]` `[GSE_BEGIN]` `[GSE_END]` `[CHECK_DONE]` `[ALL_DONE exit=N]` |
+
+**推荐 AI 工作流**：
+
+1. **启动**：用非阻塞方式跑 `GEO_run.py`，不要重定向（脚本自带日志双写）：
+   ```powershell
+   python scripts/GEO_run.py --gse GSE5281,GSE266899 --diff
+   ```
+2. **轮询日志**：通过 Read 工具读 `<out>/_GEO_run.log` 检查进度。
+   - 找到 `==== ALL_DONE exit=0 ====` 即视为成功结束
+   - 找到 `==== ALL_DONE exit=1 ====` 视为有失败 → 看 `[GSE_END] <GSE> FAIL` 上方的 `[R运行] FAIL rc=...` 块
+3. **建议的检查时间节点**（按 GSE 数量调整）：
+
+   | 步骤 | 等待时长 | 期望日志关键字 |
+   |---|---|---|
+   | 启动后 15 秒 | 短 | `[SNIFF_DONE] N/N ok` |
+   | + 30 秒（每 GSE） | 中 | `[GSE_BEGIN] 1/N <GSE>` |
+   | + 2-10 分钟（每 GSE，依数据量） | 长 | `[GSE_END] <GSE> OK/FAIL` |
+   | 最终 | — | `[CHECK_DONE]` + `==== ALL_DONE exit=N ====` |
+
+   未见 `ALL_DONE` 时勿提前判定失败 —— 继续等待或读最新一行 prefix（如 `[GSE266899|R]`）确认仍在运行。
+
+4. **乱码处理**：日志由 Python 直接写 UTF-8，**不要**用 PowerShell `>` 重定向（会变 GBK）。
+
+---
 
 > 一律通过命令行调用，**绝不修改源码**。
 
@@ -414,12 +482,18 @@ Rscript scripts/GEO_download_count.R --gse GSE99999 --keyword expression
 
 ### 2.4 GEO_download_cel.R（CEL RAW 路径）
 
+> 必须先执行预下载！本脚本默认不调用 `getGEOSuppFiles`（避免下载中断），改用 `GEO_pre_download.py` 断点续传下载 RAW 文件。
+
 ```powershell
-# 单个 GSE（CEL 路径一次只能一个）
-Rscript scripts/GEO_download_cel.R --gse GSE5281
+# 推荐流程
+python scripts/GEO_pre_download.py --gse GSE5281 --preset cel     # 1. 先预下载
+Rscript scripts/GEO_download_cel.R --gse GSE5281                  # 2. 再跑 R
 
 # 完整选项
 Rscript scripts/GEO_download_cel.R --gse GSE5281 --out ./data --diff TRUE --use-idmap TRUE --proxy http://127.0.0.1:7897
+
+# 如果一定要在线下载（不推荐，不支持断点续传）
+Rscript scripts/GEO_download_cel.R --gse GSE5281 --download-suppl TRUE
 
 # 查看帮助
 Rscript scripts/GEO_download_cel.R --help
@@ -448,7 +522,59 @@ Rscript scripts/GEO_download_cel.R --help
 - **多平台**：单平台输出无后缀；多平台自动加 `_GPL570` 等
 - **idmap 回退**：pipe → soft → bioc → 本地 GPL → NCBI 自动下载
 
-### 2.7 下游对接
+### 2.7 下载结果检查
+
+`scripts/GEO_expMatrix_check.py` 扫描输出目录下所有 GSE 子文件夹，自动识别下载类型并检查数据质量。
+
+```powershell
+# 扫描当前目录
+python scripts/GEO_expMatrix_check.py
+
+# 指定目录 + 自定义输出路径
+python scripts/GEO_expMatrix_check.py --dir ./data --output ./check.txt
+
+# 仅打印到控制台
+python scripts/GEO_expMatrix_check.py --dir ./data --no-save
+```
+
+**参数**：
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--dir <path>` | `.` | 扫描的根目录 |
+| `--output <path>` | `<dir>/check_result.txt` | 结果报告输出路径 |
+| `--no-save` | — | 仅控制台打印，不写文件 |
+
+**检查项**：
+
+| 类别 | 检查内容 |
+|---|---|
+| 文件齐全度 | clinical / expMatrix / probe2gene / group / diff 是否存在 |
+| 下载类型自动识别 | 根据产物推断 probe / cel / ncbicount / count / raw / unknown |
+| 数据质量 | 矩阵形状、数值范围、是否含 NA、是否含负值 |
+| 多平台检测 | series_matrix 数量 vs expMatrix 数量 |
+| 未处理完 | series_matrix 数 > expMatrix 数 |
+
+**输出示例**：
+
+```
+【下载类型分布】
+  probe (芯片)               3
+  ncbicount (NCBI RNA-seq)   2
+
+【存在 expMatrix*.csv 的文件夹】(5 个，共 7 个矩阵)
+文件夹         下载类型     矩阵类型   基因×样本         NA数量   负值数量   范围
+GSE12345       probe        Single     (20531, 12)      0        0          2.10-14.55
+GSE56545       ncbicount    Count      (18472, 8)       0        0          1.00-45678.00
+
+汇总统计:
+  总文件夹数:              5
+  有 expMatrix*.csv:      5 (共 7 个矩阵)
+  含 NA 的矩阵:             0
+  含负值的矩阵:             0
+```
+
+### 2.8 下游对接
 
 ```r
 exp     <- fread("data/GSE76262/expMatrix.csv") |> column_to_rownames("symbol")
@@ -468,9 +594,10 @@ diff_df <- fread("data/GSE76262/diff.txt")
 | 看 GSE 标题/设计/样本数 | **Python** | `Entrez.esummary` |
 | 批量元数据汇总成表 | **Python** | `Entrez.esummary` + `pandas.DataFrame` |
 | **下载表达矩阵（芯片）** | **R CLI** | `Rscript scripts/GEO_download_probe.R --gse ...` |
-| **下载 RAW + RMA（芯片）** | **R CLI** | `Rscript scripts/GEO_download_cel.R --gse ...` |
+| **下载 RAW + RMA（芯片）** | **R CLI** | `python scripts/GEO_pre_download.py ... --preset cel` → `Rscript scripts/GEO_download_cel.R --gse ...` |
 | **下载 NCBI RNA-seq counts** | **R CLI** | `Rscript scripts/GEO_download_ncbicount.R --gse ... --species human/mouse` |
 | **下载作者 supplementary counts** | **R CLI** | `Rscript scripts/GEO_download_count.R --gse ... --species human/mouse` |
+| **下载结果质量检查** | **Python CLI** | `python scripts/GEO_expMatrix_check.py --dir <dir>` |
 | 物种切换（人/小鼠） | **R CLI** | `--species human` / `--species mouse` |
 | 探针 → 基因 symbol | **R CLI** | 上述脚本内置 |
 | log2 / 去重 / 过滤 | **R CLI** | 上述脚本内置 |
@@ -511,22 +638,19 @@ for uid in ids[:5]:
 Rscript scripts/GEO_download_probe.R --gse GSE76262,GSE12345 --out ./data --diff TRUE
 ```
 
-**步骤 4：检查输出**
+**步骤 4：检查结果**
 
-```
-data/GSE76262/expMatrix.csv
-data/GSE76262/clinical.csv
-data/GSE76262/probe2gene.csv
-data/GSE12345/expMatrix.csv
-...
-data/download_status.txt
+```powershell
+python scripts/GEO_expMatrix_check.py --dir ./data
 ```
 
 ### 场景：已知 GSE 号
 
-跳过步骤 1-2，直接：
+跳过步骤 1-2，一键下载见 [§2.0](#20-georunpy-—-一键自动编排推荐)。或手动分步：
 ```powershell
-Rscript scripts/GEO_download_probe.R --gse GSE76262
+python scripts/GEO_smart_sniff.py --gse GSE76262                        # 1. 确认类型
+Rscript scripts/<推荐脚本> --gse GSE76262 [选项]                        # 2. R 处理
+python scripts/GEO_expMatrix_check.py                                   # 3. 检查结果
 ```
 
 ### 场景：只看元数据
@@ -595,13 +719,15 @@ uv pip install biopython GEOparse pandas requests
 
 | 组件 | 版本 | 备注 |
 |---|---|---|
-| `SKILL.md`                | 3.1 | 章节编号修正 + 依赖统一 |
-| `GEO_smart_sniff.py`      | 2.0 | 轻量版（仅 biopython） |
-| `GEO_pre_download.py`     | 1.0 | 5 类预设 + 自动代理 |
+| `SKILL.md`                | 3.6 | 新增 AI 调用范式 + 日志检查时间节点 |
+| `GEO_run.py`              | 1.2 | 内置 UTF-8 双写日志 + 流式 tee + 阶段标记 |
+| `GEO_smart_sniff.py`      | 2.1 | ncbicount 路径仅 human，不再传 --species |
+| `GEO_pre_download.py`     | 1.0 | 5 类预设 + 自动代理 + 断点续传 |
 | `GEO_download_probe.R`    | 3.0 | bitr 二次转换 |
-| `GEO_download_cel.R`      | 2.0 | CLI 化 |
-| `GEO_download_ncbicount.R`| 2.0 | 物种切换 |
+| `GEO_download_cel.R`      | 2.1 | 默认跳过 getGEOSuppFiles，需预下载 |
+| `GEO_download_ncbicount.R`| 2.1 | 仅 human（移除 mouse）|
 | `GEO_download_count.R`    | 2.0 | 物种切换 + custom OrgDb |
+| `GEO_expMatrix_check.py`  | 1.0 | 下载结果质量检查 |
 | `install_dependencies.R`  | 2.0 | 按物种条件安装 |
 
 ---
@@ -630,10 +756,13 @@ subprocess.run(["Rscript", "scripts/GEO_download_probe.R",
 ```
 
 **Q5: 能否绕过 R 脚本用 Python 下载？**
-A: 不推荐用 Python 做"完整流程"（ID 映射 / log2 / 过滤都在 R 里）。但**预下载原始文件**可以用 `scripts/GEO_pre_download.py`，按 R 脚本需求选 `--preset probe/cel/ncbicount/count/all`，详见 [§0.5 预下载](#05-预下载可选--离线兜底--加速-r-脚本)。Python 失败不影响 R（R 脚本能独立下载）。
+A: 不推荐。ID 映射 / log2 / 过滤都在 R 里。预下载仅 CEL 路径必需（`GEO_pre_download.py --preset cel`），其他路径数据量小，R 脚本内置下载足够。
 
 **Q6: 出错了如何调试？**
 A: 加 `--help` 查看用法；脚本输出含详细 `cat()` 日志便于定位。
+
+**Q7: R 脚本要跑多久？会不会卡死？**
+A: 见 [§0.5 R 脚本运行耗时参考](#r-脚本运行耗时参考)。建议加 `--timeout 1800`（30 分钟上限）。如果卡在"加载依赖"阶段超过 2 分钟，通常是 Bioconductor 包未安装，先跑 `Rscript scripts/install_dependencies.R`。
 
 ---
 

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-download_GEO.py — GEO 预下载器（CLI 版，代理自动检测）
-====================================================
-
+GEO 预下载器（CLI 版）
+---------------------
 按"预设 / 类别"批量下载 GEO 公共数据，作为后续 dsh-geo 技能 R 脚本的输入素材。
 
 类别（共 5 个）：
@@ -35,12 +34,10 @@ CLI 示例：
 
 import argparse
 import re
-import socket
 import sys
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from urllib.parse import urlparse
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
@@ -86,40 +83,6 @@ CFG = {
 
 
 _print_lock = Lock()
-
-
-# ── 代理自动检测（TCP 握手 + HTTP 测活，~1.2s） ─────
-def _probe_proxy(proxy_url: str, probe_timeout: float = 1.5) -> bool:
-    """
-    检测代理是否可用。先 TCP 握手（~0.3s），再用 1 次 HTTP 测活（~0.9s）。
-    可用返回 True；任一步失败返回 False 并打印警告。
-    """
-    if not proxy_url:
-        return False
-    try:
-        p = urlparse(proxy_url)
-        host = p.hostname
-        port = p.port or (443 if p.scheme == 'https' else 80)
-        with socket.create_connection((host, port), timeout=probe_timeout):
-            pass
-    except Exception as e:
-        print(f"  [代理检测] TCP 握手失败: {e}")
-        return False
-
-    try:
-        r = requests.get(
-            "http://www.google.com/generate_204",
-            proxies={"http": proxy_url, "https": proxy_url},
-            timeout=probe_timeout,
-        )
-        if r.status_code in (200, 204):
-            return True
-        print(f"  [代理检测] HTTP 测活异常: status={r.status_code}")
-        return False
-    except Exception as e:
-        # TCP 握手成功即视为可用（测活失败可能是 google 屏蔽，代理本身能连 NCBI）
-        print(f"  [代理检测] HTTP 测活失败（但 TCP 可达，仍视为可用）: {e}")
-        return True
 
 
 # ── 工具 ───────────────────────────────────────
@@ -401,8 +364,6 @@ def build_parser() -> argparse.ArgumentParser:
                    help="NCBI E-utilities 邮箱（GPL 查询用）")
     p.add_argument("--suppl-block", default="filelist",
                    help="suppl 屏蔽关键字，逗号分隔（默认 filelist）")
-    p.add_argument("--skip-proxy-probe", action="store_true",
-                   help="跳过启动时的代理可用性探测（默认开启探测）")
     return p
 
 
@@ -420,18 +381,6 @@ def main() -> int:
     else:
         types = PRESETS[args.preset]
 
-    # 解析代理
-    proxy = "" if args.no_proxy else (args.proxy or "")
-
-    # 代理自动检测（启动时 TCP 握手 + 1 次 HTTP 测活，~1.2s）
-    if proxy and not args.skip_proxy_probe:
-        t0 = time.time()
-        if not _probe_proxy(proxy):
-            print(f"[WARN] 代理 {proxy} 不可用，自动回退直连")
-            proxy = ""
-        else:
-            print(f"[代理检测] {proxy} 可用 ({time.time()-t0:.2f}s)")
-
     # 填充运行时配置
     CFG["gses"]        = _norm_gses(args.gse)
     CFG["email"]       = args.email
@@ -439,7 +388,7 @@ def main() -> int:
     CFG["timeout"]     = args.timeout
     CFG["retries"]     = args.retries
     CFG["api_gap"]     = args.api_gap
-    CFG["proxy"]       = proxy
+    CFG["proxy"]       = "" if args.no_proxy else (args.proxy or "")
     CFG["types"]       = set(types)
     CFG["suppl_block"] = [b.strip() for b in args.suppl_block.split(",") if b.strip()]
     CFG["out"]         = args.out

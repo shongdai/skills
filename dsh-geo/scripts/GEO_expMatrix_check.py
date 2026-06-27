@@ -132,19 +132,26 @@ def classify_folder(files, exp_types):
 # ============================================================
 # 3. 主扫描
 # ============================================================
-def check_expMatrix(base_dir):
-    """遍历 base_dir 下所有 GSE 子文件夹，返回 (results, folder_info)。"""
+def check_expMatrix(base_dir, gse_filter=None):
+    """遍历 base_dir 下所有 GSE 子文件夹，返回 (results, folder_info)。
+
+    gse_filter : 可选的 GSE 白名单（大小写不敏感）。传入后只检查匹配的子文件夹。
+    """
     results = []
     folder_info = {}
 
     if not os.path.isdir(base_dir):
         raise FileNotFoundError(f'目录不存在: {base_dir}')
 
+    whitelist = {g.upper() for g in gse_filter} if gse_filter else None
+
     for folder_name in sorted(os.listdir(base_dir)):
         folder_path = os.path.join(base_dir, folder_name)
         if not os.path.isdir(folder_path):
             continue
         if not folder_name.upper().startswith('GSE'):
+            continue
+        if whitelist is not None and folder_name.upper() not in whitelist:
             continue
 
         files = os.listdir(folder_path)
@@ -365,6 +372,8 @@ def build_parser():
     )
     p.add_argument("--dir", default=".",
                    help="扫描的根目录（默认当前目录）")
+    p.add_argument("--gse", default=None,
+                   help="只检查指定的 GSE（逗号/空格分隔），不传则扫描全部 GSE 子文件夹")
     p.add_argument("--output", default=None,
                    help="结果报告输出路径（默认 <dir>/check_result.txt）")
     p.add_argument("--no-save", action="store_true",
@@ -377,9 +386,14 @@ def main():
     args = parser.parse_args()
 
     base_dir = os.path.abspath(args.dir)
-    print(f'扫描目录: {base_dir}')
+    gse_filter = None
+    if args.gse:
+        gse_filter = [g.strip() for g in re.split(r"[,\s]+", args.gse) if g.strip()]
+        print(f'扫描目录: {base_dir}  仅检查: {",".join(gse_filter)}')
+    else:
+        print(f'扫描目录: {base_dir}')
 
-    results, folder_info = check_expMatrix(base_dir)
+    results, folder_info = check_expMatrix(base_dir, gse_filter=gse_filter)
 
     if not folder_info:
         print('[警告] 当前目录下未找到任何 GSE 开头的子文件夹')
